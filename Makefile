@@ -44,4 +44,19 @@ deb: compile
 clean:
 	rm -fr obj *.deb *.rpm docker-volume-moosefs
 
-.PHONY: clean rpm-deps deb-deps fmt deps compile
+plugin: compile
+	mkdir -p plugin/rootfs
+	docker build -t moosefs-plugin-build -f plugin/Dockerfile .
+	docker create --name tmp moosefs-plugin-build
+	docker export tmp | tar -x -C plugin/rootfs
+	docker rm -vf tmp
+	docker rmi moosefs-plugin-build
+
+plugin-enable:
+	docker plugin create moosefs/docker-volume-moosefs:$(VERSION) plugin
+	docker plugin enable moosefs/docker-volume-moosefs:$(VERSION)
+
+plugin-push: plugin plugin-enable
+	docker plugin push moosefs/docker-volume-moosefs:$(VERSION)
+
+.PHONY: clean rpm-deps deb-deps fmt deps compile plugin plugin-enable plugin-push

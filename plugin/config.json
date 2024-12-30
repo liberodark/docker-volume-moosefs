@@ -1,0 +1,25 @@
+{
+  "description": "MooseFS plugin for Docker",
+  "documentation": "https://github.com/liberodark/docker-volume-moosefs",
+  "entrypoint": ["/usr/bin/docker-volume-moosefs"],
+  "interface": {
+    "types": ["docker.volumedriver/1.0"],
+    "socket": "moosefs.sock"
+  },
+  "linux": {
+    "capabilities": ["CAP_SYS_ADMIN"],
+    "mounts": [
+      {
+        "type": "bind",
+        "source": "/mnt",
+        "destination": "/mnt",
+        "options": ["rbind"]
+      }
+    ]
+  },
+  "propagatedMount": "/mnt",
+  "workdir": "/",
+  "network": {
+    "type": "host"
+  }
+}

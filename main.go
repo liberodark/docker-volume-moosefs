@@ -4,7 +4,7 @@ import (
 	"flag"
 	"fmt"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 
 	"os/user"
 	"strconv"
@@ -29,7 +29,10 @@ func main() {
 	u, _ := user.Lookup("root")
 	gid, _ := strconv.Atoi(u.Gid)
 
-	d := newMooseFSDriver(*root)
+	d, err := newMooseFSDriver(*root)
+	if err != nil {
+		log.Fatalf("Failed to initialize driver: %v", err)
+	}
 	h := volume.NewHandler(d)
 	fmt.Println(h.ServeUnix("moosefs", gid))
 }

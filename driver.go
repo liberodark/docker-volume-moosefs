@@ -3,22 +3,29 @@ package main
 import (
 	"errors"
 	"fmt"
-    "os"
-	"path"
+	"os"
+	"strings"
 	"path/filepath"
 	"sync"
-	"syscall"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/docker/go-plugins-helpers/volume"
 )
 
+// Configuration structure
+type MoosefsConfig struct {
+    MasterHost    string
+    MasterPort    string
+    RootDir       string
+    MountOptions  []string
+}
+
 // A single volume instance
 type moosefsMount struct {
 	name    string
-    path    string
+	path    string
 	root    string
 }
 
@@ -27,16 +34,21 @@ type moosefsDriver struct {
 	m      *sync.Mutex
 }
 
-func newMooseFSDriver(root string) moosefsDriver {
-	d := moosefsDriver{
+func newMooseFSDriver(root string) (*moosefsDriver, error) {
+	d := &moosefsDriver{
 		mounts: make(map[string]*moosefsMount),
 		m:      &sync.Mutex{},
 	}
-	return d
+
+	if err := d.loadState(); err != nil {
+		return nil, err
+	}
+
+	return d, nil
 }
 
 func (d moosefsDriver) Create(r *volume.CreateRequest) error {
-    var volumeRoot string
+	var volumeRoot string
 
 	d.m.Lock()
 	defer d.m.Unlock()
@@ -45,15 +57,15 @@ func (d moosefsDriver) Create(r *volume.CreateRequest) error {
 		volumeRoot = optsRoot
 	} else {
 		// Assume the default root
-        volumeRoot = *root
+		volumeRoot = *root
 	}
 
-    volumePath := filepath.Join(volumeRoot, r.Name)
+	volumePath := filepath.Join(volumeRoot, r.Name)
 
-    if err := mkdir(volumePath); err != nil {
+	if err := mkdir(volumePath); err != nil {
 		return err
 	}
-    
+
 	if !ismoosefs(volumePath) {
 		emsg := fmt.Sprintf("Cannot create volume %s as it's not a valid MooseFS mount", volumePath)
 		log.Error(emsg)
@@ -66,17 +78,20 @@ func (d moosefsDriver) Create(r *volume.CreateRequest) error {
 		return errors.New(emsg)
 	}
 
-    if err := mkdir(volumePath); err != nil {
-		return err
-	}
 	d.mounts[r.Name] = &moosefsMount{
 		name:   r.Name,
-        path:   volumePath,
+		path:   volumePath,
 		root:   volumeRoot,
 	}
 
 	if *verbose {
 		spew.Dump(d.mounts)
+	}
+
+	if err := d.saveState(); err != nil {
+		// If we can't save state, remove the volume from memory
+		delete(d.mounts, r.Name)
+		return err
 	}
 
 	return nil
@@ -87,6 +102,9 @@ func (d moosefsDriver) Remove(r *volume.RemoveRequest) error {
 	defer d.m.Unlock()
 	if _, ok := d.mounts[r.Name]; ok {
 		delete(d.mounts, r.Name)
+		if err := d.saveState(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -99,16 +117,16 @@ func (d moosefsDriver) Path(r *volume.PathRequest) (*volume.PathResponse, error)
 }
 
 func (d moosefsDriver) Mount(r *volume.MountRequest) (*volume.MountResponse, error) {
-	volumePath := filepath.Join(d.mounts[r.Name].root, r.Name)
-	if !ismoosefs(volumePath) {
-		emsg := fmt.Sprintf("Cannot mount volume %s as it's not a valid MooseFS mount", volumePath)
-		log.Error(emsg)
-		return &volume.MountResponse{}, errors.New(emsg)
-	}
-	if _, ok := d.mounts[r.Name]; ok {
-		return &volume.MountResponse{Mountpoint: d.mounts[r.Name].path}, nil
-	}
-	return &volume.MountResponse{}, nil
+    volumePath := filepath.Join(d.mounts[r.Name].root, r.Name)
+    if !ismoosefs(volumePath) {
+        emsg := fmt.Sprintf("Cannot mount volume %s as it's not a valid MooseFS mount", volumePath)
+        log.Error(emsg)
+        return &volume.MountResponse{}, errors.New(emsg)
+    }
+    if _, ok := d.mounts[r.Name]; ok {
+        return &volume.MountResponse{Mountpoint: d.mounts[r.Name].path}, nil
+    }
+    return &volume.MountResponse{}, nil
 }
 
 func (d moosefsDriver) Unmount(r *volume.UnmountRequest) error {
@@ -137,15 +155,41 @@ func (d moosefsDriver) Capabilities() *volume.CapabilitiesResponse {
 	return &res
 }
 
-// Check if MooseFS is mounted in mountpoint using the .masterinfo file
-func ismoosefs(mountpoint string) bool {
-	stat := syscall.Statfs_t{}
-	err := syscall.Statfs(path.Join(mountpoint, ".masterinfo"), &stat)
-	if err != nil {
-		log.Errorf("Could not determine filesystem type for %s: %s", mountpoint, err)
-		return false
-	}
-	return true
+// Check if path is under a MooseFS mount
+func ismoosefs(checkPath string) bool {
+    absPath, err := filepath.Abs(checkPath)
+    if err != nil {
+        log.Errorf("Cannot get absolute path for %s: %s", checkPath, err)
+        return false
+    }
+
+    data, err := os.ReadFile("/proc/mounts")
+    if err != nil {
+        log.Errorf("Cannot read /proc/mounts: %s", err)
+        return false
+    }
+
+    mounts := strings.Split(string(data), "\n")
+    for _, mount := range mounts {
+        fields := strings.Fields(mount)
+        if len(fields) < 3 {
+            continue
+        }
+
+        mountPoint := fields[1]
+        fsType := fields[2]
+
+        if fsType == "fuse.mfs" {
+            log.Infof("Found MooseFS mount at %s", mountPoint)
+            if strings.HasPrefix(absPath, mountPoint) {
+                log.Infof("Path %s is under MooseFS mount %s", absPath, mountPoint)
+                return true
+            }
+        }
+    }
+
+    log.Infof("Path %s is not under any MooseFS mount", absPath)
+    return false
 }
 
 func mkdir(path string) error {
